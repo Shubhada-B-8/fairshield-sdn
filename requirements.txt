@@ -1,0 +1,2 @@
+# The core simulator/dashboard use only the Python standard library.
+# Optional ML packages are installed with: python -m pip install -e ".[ml]"

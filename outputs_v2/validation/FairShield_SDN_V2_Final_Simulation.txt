@@ -1,0 +1,7 @@
+SCENARIO | LEGIT PRESERVED | ATTACK MITIGATED | FAIRNESS | F1 | MEAN ATTACK CAP PPS
+normal       |            95.5% |              0.0% |    1.000 | 0.000 |                0.00
+ddos         |            99.5% |             99.8% |    1.000 | 1.000 |                1.62
+flash_crowd  |            25.4% |              0.0% |    0.694 | 0.000 |                0.00
+mixed        |            38.4% |             99.8% |    0.828 | 1.000 |                1.35
+
+Saved V2 feedback experiment outputs to: /tmp/fairshield_v2_final_run

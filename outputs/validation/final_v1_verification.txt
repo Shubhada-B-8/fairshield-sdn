@@ -1,0 +1,15 @@
+FairShield-SDN V1.1.0 release verification record
+
+Package QA environment: container Python 3.13.5
+Automated tests: 16 passed, 0 failed
+Command: PYTHONPATH=src python3 -m unittest discover -s tests -v
+Python syntax: all src/fairshield/*.py compiled successfully
+Shell syntax: all scripts/*.sh passed bash -n
+Simulator reproducibility: seed 7, 30 windows, capacity 500; regenerated 12 summary rows matched saved reproducibility summary for scenario, policy, legitimate preservation, attack mitigation, Jain fairness, F1 and delivered PPS.
+Slides: 13 slides; overflow test passed.
+Research-paper DOCX: rendered to PNG successfully for visual layout review (4 pages).
+
+Important separation:
+- This packaging QA was performed in a separate container; it is not a new live network test.
+- Live Mininet/OVS evidence is transcribed from the user's actual WSL session and is documented in docs/LIVE_DEMO_EVIDENCE.md.
+- Faculty demonstration is pending.

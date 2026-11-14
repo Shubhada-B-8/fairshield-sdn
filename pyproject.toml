@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fairshield-sdn"
+version = "2.0.0"
+description = "Feedback-driven adaptive fairness-aware DDoS admission control research prototype for SDN"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{name = "FairShield-SDN Research Prototype"}]
+license = {text = "MIT"}
+dependencies = []
+
+[project.optional-dependencies]
+ml = ["numpy>=1.24", "scikit-learn>=1.3", "joblib>=1.3"]
+sdn = ["os-ken>=4.2"]
+
+[project.scripts]
+fairshield = "fairshield.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

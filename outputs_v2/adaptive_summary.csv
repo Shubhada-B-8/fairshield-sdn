@@ -1,0 +1,5 @@
+scenario,policy,windows,seed,capacity_pps,legitimate_preservation,attack_mitigation,jain_satisfaction_fairness,delivered_pps,precision,recall,f1,mean_attack_cap_pps,min_attack_cap_pps,max_attack_cap_pps
+normal,adaptive_fairshield_v2,30,7,500.0,0.9553495658985574,0.0,0.9998848566111995,487.8333333333333,0.0,0.0,0.0,0.0,0.0,0.0
+ddos,adaptive_fairshield_v2,30,7,500.0,0.9949620837902737,0.9979855000363543,0.9999892346060686,448.21022135416666,1.0,1.0,1.0,1.6162109375,1.0,5.0
+flash_crowd,adaptive_fairshield_v2,30,7,500.0,0.2544615593404355,0.0,0.693904547735402,500.0,0.0,0.0,0.0,0.0,0.0,0.0
+mixed,adaptive_fairshield_v2,30,7,500.0,0.3844463455914908,0.9982751917277399,0.8284336927843571,500.0,1.0,1.0,1.0,1.3480143229166666,1.0,5.0

@@ -1,0 +1,440 @@
+"""FairShield SDN controller adapter for OpenFlow 1.3.
+
+OS-Ken is preferred; Ryu imports remain as a compatibility fallback.  The
+controller uses a two-table pipeline: table 0 applies a per-source meter and
+jumps to table 1; table 1 performs MAC learning and forwarding.  Periodic
+OpenFlow flow statistics feed a per-source policy that applies demand caps and
+weighted max-min allocation in kbit/s.
+
+This is an educational lab prototype.  It is not hardened for production.
+"""
+from __future__ import annotations
+
+import time
+
+try:  # OS-Ken is the maintained Ryu fork and is preferred.
+    from os_ken.base import app_manager
+    _AppBase = app_manager.OSKenApp
+    from os_ken.controller import ofp_event
+    from os_ken.controller.handler import (
+        CONFIG_DISPATCHER, DEAD_DISPATCHER, MAIN_DISPATCHER, set_ev_cls,
+    )
+    from os_ken.ofproto import ofproto_v1_3
+    from os_ken.lib import hub
+    from os_ken.lib.packet import ethernet, ether_types, ipv4, packet, tcp, udp
+except ImportError:  # pragma: no cover - compatibility path for existing Ryu labs
+    try:
+        from ryu.base import app_manager
+        _AppBase = app_manager.RyuApp
+        from ryu.controller import ofp_event
+        from ryu.controller.handler import (
+            CONFIG_DISPATCHER, DEAD_DISPATCHER, MAIN_DISPATCHER, set_ev_cls,
+        )
+        from ryu.ofproto import ofproto_v1_3
+        from ryu.lib import hub
+        from ryu.lib.packet import ethernet, ether_types, ipv4, packet, tcp, udp
+    except ImportError as exc:  # pragma: no cover - optional integration
+        raise SystemExit(
+            "Neither OS-Ken nor Ryu is installed. On Linux install the optional "
+            "SDN dependencies with: python -m pip install -e '.[sdn]'"
+        ) from exc
+
+from .models import FlowSample
+from .sdn_policy import SdnPolicyConfig, SdnSourcePolicy
+
+
+POLL_SECONDS = 5.0
+STALE_SECONDS = 60.0
+FLOW_IDLE_TIMEOUT = 60
+
+
+class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
+    OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.policy = SdnSourcePolicy(SdnPolicyConfig(
+            capacity_kbps=10_000.0,
+            attacker_cap_kbps=1_500.0,
+            poll_seconds=POLL_SECONDS,
+            medium_pps=300.0,
+            high_pps=800.0,
+            small_packet_bytes=256.0,
+            port_fanout_threshold=8,
+            high_bps_threshold=1_000_000.0,
+            score_threshold=0.75,
+        ))
+        self.datapaths = {}
+        self.mac_to_port: dict[int, dict[str, int]] = {}
+        self.previous_counters: dict[tuple[int, str], tuple[int, int]] = {}
+        self.source_last_seen: dict[tuple[int, str], float] = {}
+        self.source_meters: dict[int, dict[str, tuple[int, int]]] = {}
+        self.next_meter_id: dict[int, int] = {}
+        self.previous_port_counters = {}
+        self.previous_meter_counters = {}
+        self.port_deltas = {}
+        self.meter_deltas = {}
+        self.window_id = 0
+        self.monitor_thread = hub.spawn(self._monitor)
+        self.logger.info("FairShield OS-Ken/Ryu adapter started (OpenFlow 1.3)")
+
+    @set_ev_cls(ofp_event.EventOFPErrorMsg, MAIN_DISPATCHER)
+    def error_msg_handler(self, ev):
+        msg = ev.msg
+        self.logger.error(
+            "OpenFlow error from switch %s: type=%s code=%s data=%r",
+            msg.datapath.id, msg.type, msg.code, msg.data[:64] if msg.data else b"",
+        )
+
+    @set_ev_cls(ofp_event.EventOFPStateChange, [MAIN_DISPATCHER, DEAD_DISPATCHER])
+    def state_change_handler(self, ev):
+        datapath = ev.datapath
+        if ev.state == MAIN_DISPATCHER:
+            self.datapaths[datapath.id] = datapath
+        elif ev.state == DEAD_DISPATCHER:
+            self.datapaths.pop(datapath.id, None)
+            self.source_meters.pop(datapath.id, None)
+
+    @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
+    def switch_features_handler(self, ev):
+        datapath = ev.msg.datapath
+        ofp = datapath.ofproto
+        parser = datapath.ofproto_parser
+        # Table 0 enforces source meters; every packet then proceeds to table 1.
+        datapath.send_msg(parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=0,
+            priority=0,
+            match=parser.OFPMatch(),
+            instructions=[parser.OFPInstructionGotoTable(1)],
+        ))
+        # Table 1 sends unknown traffic to the controller for MAC learning.
+        controller_actions = [parser.OFPActionOutput(
+            ofp.OFPP_CONTROLLER, ofp.OFPCML_NO_BUFFER
+        )]
+        datapath.send_msg(parser.OFPFlowMod(
+            datapath=datapath,
+            table_id=1,
+            priority=0,
+            match=parser.OFPMatch(),
+            instructions=[parser.OFPInstructionActions(
+                ofp.OFPIT_APPLY_ACTIONS, controller_actions
+            )],
+        ))
+        self.logger.info("Switch %s configured with two-table pipeline", datapath.id)
+
+    def _monitor(self):
+        while True:
+            for datapath in list(self.datapaths.values()):
+                parser = datapath.ofproto_parser
+                datapath.send_msg(parser.OFPFlowStatsRequest(
+                    datapath,
+                    table_id=1,
+                    out_port=datapath.ofproto.OFPP_ANY,
+                    out_group=datapath.ofproto.OFPG_ANY,
+                    match=parser.OFPMatch(),
+                ))
+                datapath.send_msg(parser.OFPPortStatsRequest(
+                    datapath,
+                    port_no=datapath.ofproto.OFPP_ANY,
+                ))
+                for meter_id, _rate in self.source_meters.get(datapath.id, {}).values():
+                    datapath.send_msg(parser.OFPMeterStatsRequest(
+                        datapath,
+                        meter_id=meter_id,
+                    ))
+            hub.sleep(POLL_SECONDS)
+
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def port_stats_reply_handler(self, ev):
+        datapath = ev.msg.datapath
+        dpid = datapath.id
+
+        for stat in ev.msg.body:
+            port_no = int(stat.port_no)
+            if port_no >= datapath.ofproto.OFPP_MAX:
+                continue
+
+            key = (dpid, port_no)
+            current = (int(stat.rx_packets), int(stat.tx_packets),
+                       int(stat.rx_bytes), int(stat.tx_bytes))
+            previous = self.previous_port_counters.get(key)
+
+            if previous is not None:
+                delta = tuple(max(0, cur - old)
+                              for cur, old in zip(current, previous))
+                if any(delta):
+                    self.port_deltas[key] = {
+                        "timestamp": time.monotonic(),
+                        "rx_packets": delta[0],
+                        "tx_packets": delta[1],
+                        "rx_bytes": delta[2],
+                        "tx_bytes": delta[3],
+                    }
+                    self.logger.info(
+                        "PORT_DELTA dpid=%s port=%s rx_packets=%s "
+                        "tx_packets=%s rx_bytes=%s tx_bytes=%s",
+                        dpid, port_no, *delta,
+                    )
+
+            self.previous_port_counters[key] = current
+
+    @set_ev_cls(ofp_event.EventOFPMeterStatsReply, MAIN_DISPATCHER)
+    def meter_stats_reply_handler(self, ev):
+        datapath = ev.msg.datapath
+        dpid = datapath.id
+
+        meter_to_source = {
+            meter_id: src_ip
+            for src_ip, (meter_id, _rate)
+            in self.source_meters.get(dpid, {}).items()
+        }
+
+        for stat in ev.msg.body:
+            meter_id = int(stat.meter_id)
+            src_ip = meter_to_source.get(meter_id)
+            if src_ip is None:
+                continue
+
+            dropped_packets = sum(
+                int(band.packet_band_count)
+                for band in (stat.band_stats or [])
+            )
+            dropped_bytes = sum(
+                int(band.byte_band_count)
+                for band in (stat.band_stats or [])
+            )
+            current = (int(stat.packet_in_count),
+                       int(stat.byte_in_count),
+                       dropped_packets, dropped_bytes)
+            key = (dpid, meter_id)
+            previous = self.previous_meter_counters.get(key)
+
+            if previous is not None:
+                delta = tuple(max(0, cur - old)
+                              for cur, old in zip(current, previous))
+                if any(delta):
+                    self.meter_deltas[(dpid, src_ip)] = {
+                        "timestamp": time.monotonic(),
+                        "input_packets": delta[0],
+                        "input_bytes": delta[1],
+                        "dropped_packets": delta[2],
+                        "dropped_bytes": delta[3],
+                    }
+                    self.logger.info(
+                        "METER_DELTA source=%s meter_id=%s "
+                        "input_packets=%s input_bytes=%s "
+                        "dropped_packets=%s dropped_bytes=%s",
+                        src_ip, meter_id, *delta,
+                    )
+
+            self.previous_meter_counters[key] = current
+
+    @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
+    def packet_in_handler(self, ev):
+        msg = ev.msg
+        datapath = msg.datapath
+        ofp = datapath.ofproto
+        parser = datapath.ofproto_parser
+        in_port = msg.match.get("in_port")
+        pkt = packet.Packet(msg.data)
+        eth = pkt.get_protocol(ethernet.ethernet)
+        if eth is None or eth.ethertype == ether_types.ETH_TYPE_LLDP:
+            return
+
+        dpid = datapath.id
+        learned = self.mac_to_port.setdefault(dpid, {})
+        learned[eth.src] = in_port
+        out_port = learned.get(eth.dst, ofp.OFPP_FLOOD)
+        actions = [parser.OFPActionOutput(out_port)]
+
+        # Install a table-1 forwarding entry only after the destination is known.
+        if out_port != ofp.OFPP_FLOOD:
+            match_fields = {
+                "in_port": in_port,
+                "eth_src": eth.src,
+                "eth_dst": eth.dst,
+                "eth_type": eth.ethertype,
+            }
+            ip_pkt = pkt.get_protocol(ipv4.ipv4)
+            if ip_pkt is not None:
+                match_fields.update({"eth_type": ether_types.ETH_TYPE_IP,
+                                     "ipv4_src": ip_pkt.src, "ipv4_dst": ip_pkt.dst})
+                tcp_pkt = pkt.get_protocol(tcp.tcp)
+                udp_pkt = pkt.get_protocol(udp.udp)
+                if tcp_pkt is not None:
+                    match_fields.update({"ip_proto": 6, "tcp_dst": tcp_pkt.dst_port})
+                elif udp_pkt is not None:
+                    match_fields.update({"ip_proto": 17, "udp_dst": udp_pkt.dst_port})
+            match = parser.OFPMatch(**match_fields)
+            instructions = [parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
+            datapath.send_msg(parser.OFPFlowMod(
+                datapath=datapath,
+                table_id=1,
+                priority=100,
+                match=match,
+                instructions=instructions,
+                idle_timeout=FLOW_IDLE_TIMEOUT,
+            ))
+
+        data = None if msg.buffer_id != ofp.OFP_NO_BUFFER else msg.data
+        datapath.send_msg(parser.OFPPacketOut(
+            datapath=datapath,
+            buffer_id=msg.buffer_id,
+            in_port=in_port,
+            actions=actions,
+            data=data,
+        ))
+
+    @set_ev_cls(ofp_event.EventOFPFlowStatsReply, MAIN_DISPATCHER)
+    def flow_stats_reply_handler(self, ev):
+        datapath = ev.msg.datapath
+        dpid = datapath.id
+        source_stats: dict[str, dict] = {}
+        now = time.monotonic()
+
+        for stat in ev.msg.body:
+            match = stat.match
+            src_ip = match.get("ipv4_src")
+            if not src_ip or match.get("eth_type") != ether_types.ETH_TYPE_IP:
+                continue
+            key = (dpid, str(match))
+            old_packets, old_bytes = self.previous_counters.get(key, (0, 0))
+            current_packets = int(stat.packet_count)
+            current_bytes = int(stat.byte_count)
+            packet_delta = max(0, current_packets - old_packets)
+            byte_delta = max(0, current_bytes - old_bytes)
+            self.previous_counters[key] = (current_packets, current_bytes)
+
+            rec = source_stats.setdefault(str(src_ip), {
+                "packets": 0, "bytes": 0, "ports": set(),
+            })
+            rec["packets"] += packet_delta
+            rec["bytes"] += byte_delta
+            tcp_dst = match.get("tcp_dst")
+            udp_dst = match.get("udp_dst")
+            if tcp_dst is not None:
+                rec["ports"].add(("tcp", int(tcp_dst)))
+            if udp_dst is not None:
+                rec["ports"].add(("udp", int(udp_dst)))
+            self.source_last_seen[(dpid, str(src_ip))] = now
+
+        self.window_id += 1
+        samples = [FlowSample(
+            window_id=self.window_id,
+            src_ip=src_ip,
+            dst_ip="0.0.0.0",
+            packets=rec["packets"],
+            byte_count=rec["bytes"],
+            syn_packets=0,
+            unique_dst_ports=len(rec["ports"]),
+            duration_s=POLL_SECONDS,
+            label="unknown",
+        ) for src_ip, rec in source_stats.items()]
+
+        for decision in self.policy.decide(samples):
+            if decision.allocated_kbps < decision.offered_kbps * 0.98:
+                self._ensure_source_meter(datapath, decision.src_ip,
+                                          decision.allocated_kbps)
+            else:
+                self._remove_source_meter(datapath, decision.src_ip)
+            if decision.suspicious or decision.action == "RATE_LIMIT":
+                self.logger.warning(
+                    "FairShield source=%s action=%s score=%.2f observed=%.1f kbps "
+                    "admitted=%.1f kbps allocated=%.1f kbps reasons=%s",
+                    decision.src_ip, decision.action, decision.score,
+                    decision.offered_kbps, decision.admitted_kbps,
+                    decision.allocated_kbps, "; ".join(decision.reasons),
+                )
+
+        # Remove rules for sources whose flows have expired from the switch.
+        for (meter_dpid, src_ip), last_seen in list(self.source_last_seen.items()):
+            if meter_dpid == dpid and now - last_seen > STALE_SECONDS:
+                self._remove_source_meter(datapath, src_ip)
+                self.source_last_seen.pop((meter_dpid, src_ip), None)
+
+    def _ensure_source_meter(self, datapath, src_ip: str, rate_kbps: float):
+        dpid = datapath.id
+        parser = datapath.ofproto_parser
+        ofp = datapath.ofproto
+        meters = self.source_meters.setdefault(dpid, {})
+        safe_rate = max(64, int(round(rate_kbps)))
+        current = meters.get(src_ip)
+
+        if current is None:
+            meter_id = self.next_meter_id.get(dpid, 1)
+            if meter_id >= ofp.OFPM_MAX:
+                self.logger.error("No OpenFlow meter IDs remain on switch %s", dpid)
+                return
+            self.next_meter_id[dpid] = meter_id + 1
+            command = ofp.OFPMC_ADD
+        else:
+            meter_id, old_rate = current
+            if abs(safe_rate - old_rate) / max(old_rate, 1) < 0.05:
+                return
+            command = ofp.OFPMC_MODIFY
+
+        band = parser.OFPMeterBandDrop(rate=safe_rate, burst_size=max(64, safe_rate // 10))
+        datapath.send_msg(parser.OFPMeterMod(
+            datapath=datapath,
+            command=command,
+            flags=ofp.OFPMF_KBPS | ofp.OFPMF_BURST,
+            meter_id=meter_id if current is None else current[0],
+            bands=[band],
+        ))
+        self.logger.info(
+            "METER_REQUEST action=%s source=%s meter_id=%s rate=%s kbps",
+            "ADD" if current is None else "MODIFY",
+            src_ip,
+            meter_id if current is None else current[0],
+            safe_rate,
+        )
+        if current is None:
+            instructions = [
+                parser.OFPInstructionMeter(meter_id),
+                parser.OFPInstructionGotoTable(1),
+            ]
+            match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src_ip)
+            datapath.send_msg(parser.OFPFlowMod(
+                datapath=datapath,
+                table_id=0,
+                priority=40000,
+                match=match,
+                instructions=instructions,
+                idle_timeout=0,
+                hard_timeout=0,
+            ))
+            self.logger.info(
+                "METER_RULE_REQUEST source=%s meter_id=%s table=0 priority=40000",
+                src_ip, meter_id,
+            )
+        meters[src_ip] = (meter_id if current is None else current[0], safe_rate)
+
+    def _remove_source_meter(self, datapath, src_ip: str):
+        dpid = datapath.id
+        meters = self.source_meters.get(dpid, {})
+        current = meters.pop(src_ip, None)
+        if current is None:
+            return
+        parser = datapath.ofproto_parser
+        ofp = datapath.ofproto
+        match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src_ip)
+        datapath.send_msg(parser.OFPFlowMod(
+            datapath=datapath,
+            command=ofp.OFPFC_DELETE,
+            table_id=0,
+            out_port=ofp.OFPP_ANY,
+            out_group=ofp.OFPG_ANY,
+            match=match,
+        ))
+        datapath.send_msg(parser.OFPMeterMod(
+            datapath=datapath,
+            command=ofp.OFPMC_DELETE,
+            flags=0,
+            meter_id=current[0],
+            bands=[],
+        ))
+        self.logger.info(
+            "METER_DELETE_REQUEST source=%s meter_id=%s",
+            src_ip, current[0],
+        )

@@ -1,0 +1,43 @@
+FairShield-SDN V2.0.0 release verification
+========================================
+Validation environment: package build container; Python 3 runtime.
+
+Automated tests:
+  25 tests passed.
+
+Syntax:
+  python -m compileall -q src tests
+  PASS
+
+V2 four-scenario synthetic experiment:
+  command: python -m fairshield.cli adaptive-demo --scenario all --windows 30 --seed 7 --capacity 500 --out outputs_v2
+  PASS
+
+Dashboard V2 API smoke test:
+  GET /api/run?scenario=ddos&windows=2&version=2
+  HTTP 200; response includes no_defense, static_threshold, fairshield and adaptive_fairshield_v2.
+  PASS
+
+Slide validation:
+  slides_test.py found no overflow.
+  PASS
+
+DOCX validation:
+  Both report and paper rendered to PNG pages and visually reviewed.
+  PASS
+
+Multi-seed robustness run:
+  10 paired seeds x 4 scenarios x 4 policies; outputs stored under outputs_v2/multiseed/.
+  PASS
+
+Python package build/install:
+  Wheel fairshield_sdn-2.0.0-py3-none-any.whl built and installed into an isolated target.
+  Package import and version 2.0.0 check passed.
+
+ZIP validation:
+  unzip -t completed with no errors; release archive integrity passed.
+
+Important boundary:
+  V2 adaptive feedback is validated in the offline simulator and dashboard only.
+  The live OS-Ken/OpenFlow adapter remains V1. Live V2 meter-stat integration and
+  multi-source Mininet evaluation are pending.

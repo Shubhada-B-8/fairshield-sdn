@@ -1,0 +1,22 @@
+test_attack_like_flow_is_flagged (test_core.DetectorTests.test_attack_like_flow_is_flagged) ... ok
+test_flash_crowd_not_flagged_by_combined_detector (test_core.DetectorTests.test_flash_crowd_not_flagged_by_combined_detector) ... ok
+test_normal_flow_is_not_flagged (test_core.DetectorTests.test_normal_flow_is_not_flagged) ... ok
+test_jain_index (test_core.FairnessTests.test_jain_index) ... ok
+test_weighted_max_min_respects_capacity (test_core.FairnessTests.test_weighted_max_min_respects_capacity) ... ok
+test_weighted_max_min_respects_demand (test_core.FairnessTests.test_weighted_max_min_respects_demand) ... ok
+test_attack_mitigation_measures_policy_not_congestion_loss (test_core.SimulationTests.test_attack_mitigation_measures_policy_not_congestion_loss) ... ok
+test_ddos_scenario_detects_and_mitigates_attack (test_core.SimulationTests.test_ddos_scenario_detects_and_mitigates_attack) ... ok
+test_normal_scenario_has_no_attack (test_core.SimulationTests.test_normal_scenario_has_no_attack) ... ok
+test_tcp_telemetry_round_trip (test_core.SocketLabTests.test_tcp_telemetry_round_trip) ... ok
+test_udp_telemetry_round_trip (test_core.SocketLabTests.test_udp_telemetry_round_trip) ... ok
+test_attack_cap_is_applied_before_fair_share (test_sdn_policy.LiveSdnPolicyTests.test_attack_cap_is_applied_before_fair_share) ... ok
+test_high_rate_small_packet_source_is_detected_and_capped (test_sdn_policy.LiveSdnPolicyTests.test_high_rate_small_packet_source_is_detected_and_capped) ... ok
+test_large_packet_flash_crowd_source_is_not_detected (test_sdn_policy.LiveSdnPolicyTests.test_large_packet_flash_crowd_source_is_not_detected) ... ok
+test_source_recovers_when_traffic_returns_to_normal (test_sdn_policy.LiveSdnPolicyTests.test_source_recovers_when_traffic_returns_to_normal) ... ok
+test_weighted_max_min_respects_live_capacity (test_sdn_policy.LiveSdnPolicyTests.test_weighted_max_min_respects_live_capacity) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 1.008s
+
+OK
+Python syntax compilation: passed (13 source files)
