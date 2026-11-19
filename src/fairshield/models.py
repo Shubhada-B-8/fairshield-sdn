@@ -16,7 +16,7 @@ class FlowSample:
     unique_dst_ports: int
     duration_s: float = 1.0
     label: str = "unknown"  # Simulation ground truth only; never used by the detector.
-
+    service_class: str = "standard"
     @property
     def pps(self) -> float:
         return self.packets / max(self.duration_s, 1e-9)

@@ -1,0 +1,27 @@
+[
+  {
+    "scenario": "flash_crowd",
+    "policy": "fairshield_v3_ai_5g_sim",
+    "windows": 30,
+    "seed": 100,
+    "capacity_pps": 500.0,
+    "legitimate_preservation": 0.2512604901254628,
+    "attack_mitigation": 0.0,
+    "jain_fairness": 0.779781279303521,
+    "delivered_pps": 500.0000000000001,
+    "detection_precision": 0.0,
+    "detection_recall": 0.0,
+    "detection_f1": 0.0,
+    "mean_latency_ms": 121.47171150421596,
+    "p95_latency_ms": 128.71187937092836,
+    "mean_jitter_ms": 11.647191751350299,
+    "packet_loss_ratio": 0.7484641191520596,
+    "throughput_mbps": 3.2992094557504874,
+    "connection_reliability": 0.2515358808479402,
+    "mean_utilization": 1.0,
+    "mean_ai_risk": 1.4280913978494622e-05,
+    "policy_filtered_pps": 0.0,
+    "congestion_dropped_pps": 1489.9666666666667,
+    "delivered_bytes": 12372035.459064327
+  }
+]

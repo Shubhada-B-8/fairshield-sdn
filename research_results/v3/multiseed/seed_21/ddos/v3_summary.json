@@ -1,0 +1,27 @@
+[
+  {
+    "scenario": "ddos",
+    "policy": "fairshield_v3_ai_5g_sim",
+    "windows": 30,
+    "seed": 21,
+    "capacity_pps": 500.0,
+    "legitimate_preservation": 0.9878039599488072,
+    "attack_mitigation": 0.9936850968285152,
+    "jain_fairness": 0.9999850623664056,
+    "delivered_pps": 467.36666666666684,
+    "detection_precision": 1.0,
+    "detection_recall": 1.0,
+    "detection_f1": 1.0,
+    "mean_latency_ms": 19.563698126584406,
+    "p95_latency_ms": 22.86447402774501,
+    "mean_jitter_ms": 1.2477212608490855,
+    "packet_loss_ratio": 0.010109782206503529,
+    "throughput_mbps": 2.8755906126984123,
+    "connection_reliability": 0.9898902177934964,
+    "mean_utilization": 0.9347333333333335,
+    "mean_ai_risk": 0.37500491898148147,
+    "policy_filtered_pps": 4720.666666666667,
+    "congestion_dropped_pps": 5.399999999999997,
+    "delivered_bytes": 10783464.797619047
+  }
+]

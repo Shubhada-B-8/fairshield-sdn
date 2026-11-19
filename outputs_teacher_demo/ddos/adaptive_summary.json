@@ -1,0 +1,19 @@
+[
+  {
+    "scenario": "ddos",
+    "policy": "adaptive_fairshield_v2",
+    "windows": 30,
+    "seed": 7,
+    "capacity_pps": 500.0,
+    "legitimate_preservation": 0.9949620837902737,
+    "attack_mitigation": 0.9979855000363543,
+    "jain_satisfaction_fairness": 0.9999892346060684,
+    "delivered_pps": 448.21022135416666,
+    "precision": 1.0,
+    "recall": 1.0,
+    "f1": 1.0,
+    "mean_attack_cap_pps": 1.6162109375,
+    "min_attack_cap_pps": 1.0,
+    "max_attack_cap_pps": 5.0
+  }
+]

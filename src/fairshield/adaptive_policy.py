@@ -75,6 +75,7 @@ class NetworkFeedback:
 class _SourceState:
     cap_pps: float
     normal_streak: int = 0
+    attack_latched: bool = False
     last_reason: str = "initial_cap"
 
 
@@ -114,7 +115,7 @@ class AdaptiveFairnessController:
     def state_snapshot(self) -> dict[str, dict[str, float | int | str]]:
         return {
             ip: {"cap_pps": state.cap_pps, "normal_streak": state.normal_streak,
-                 "last_reason": state.last_reason}
+                 "attack_latched": state.attack_latched, "last_reason": state.last_reason}
             for ip, state in sorted(self._states.items())
         }
 
@@ -171,18 +172,30 @@ class AdaptiveFairnessController:
         for sample in samples:
             detection = self.detector.detect(sample)
             state = self._state_for(sample.src_ip)
+
+            if detection.suspicious:
+                state.attack_latched = True
+                state.normal_streak = 0
+
             feedback = feedback_by_source.get(sample.src_ip)
             if feedback is None:
-                # Never interpret missing telemetry as healthy network feedback.
-                # Hold the current cap and do not advance benign recovery.
                 adjustment = "missing_feedback_hold"
                 state.last_reason = adjustment
             else:
                 adjustment = self._adjust(state, detection.suspicious, feedback)
-            admitted_pps = min(sample.pps, state.cap_pps) if detection.suspicious else sample.pps
+
+            if (state.attack_latched and not detection.suspicious
+                    and feedback is not None
+                    and state.normal_streak >= self.config.recovery_windows
+                    and state.cap_pps >= self.config.initial_attack_cap_pps - 1e-9):
+                state.attack_latched = False
+                adjustment = "attack_recovery_complete"
+
+            effective_suspicious = detection.suspicious or state.attack_latched
+            admitted_pps = min(sample.pps, state.cap_pps) if effective_suspicious else sample.pps
             admitted[sample.src_ip] = admitted_pps
             rows[sample.src_ip] = (
-                sample, detection.suspicious, detection.score, detection.reasons,
+                sample, effective_suspicious, detection.score, detection.reasons,
                 state.cap_pps, adjustment,
             )
 

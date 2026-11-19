@@ -10,6 +10,7 @@ This is an educational lab prototype.  It is not hardened for production.
 """
 from __future__ import annotations
 
+import json
 import time
 
 try:  # OS-Ken is the maintained Ryu fork and is preferred.
@@ -43,11 +44,14 @@ from .models import FlowSample
 from .adaptive_policy import AdaptiveFairnessController, AdaptivePolicyConfig, NetworkFeedback
 from .detector import DetectorConfig, RuleBasedDetector
 from .sdn_policy import SdnPolicyConfig, SdnSourcePolicy
+from .syn_telemetry import SynTelemetry
+from .network_telemetry import NetworkTelemetry
 
 
 POLL_SECONDS = 5.0
 STALE_SECONDS = 60.0
 FLOW_IDLE_TIMEOUT = 60
+SYN_FLOW_COOKIE = 0xF5A1000000000001
 
 
 class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
@@ -80,15 +84,48 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                 score_threshold=0.55,
             )),
         ))
+        # V3 AI detector: shadow mode preserves existing V2 enforcement.
+        self.ai_adapter = None
+        try:
+            from .v3_ai import AIRiskDetector
+            from .v3_ai_sdn import (
+                V3AIDetectionAdapter,
+                V3AIDetectorConfig,
+            )
+
+            ai_detector = AIRiskDetector.train_synthetic()
+            self.ai_adapter = V3AIDetectionAdapter(
+                ai_detector=ai_detector,
+                rule_detector=self.adaptive_policy.detector,
+                config=V3AIDetectorConfig(
+                    mode="hybrid",
+                    fusion="ai",
+                    fail_open=True,
+                ),
+            )
+            # AI is the primary detector; rules are retained as inference fallback.
+            self.adaptive_policy.detector = self.ai_adapter
+            self.logger.info(
+                "V3 AI detector initialized successfully (ACTIVE AI mode)"
+            )
+        except Exception:
+            self.logger.exception(
+                "V3 AI initialization failed; continuing with V2 rule detector"
+            )
+
         self.datapaths = {}
         self.mac_to_port: dict[int, dict[str, int]] = {}
         self.previous_counters: dict[tuple[int, str], tuple[int, int]] = {}
+        self.syn_telemetry = SynTelemetry()
         self.observed_sources: set[tuple[int, str]] = set()
         self.forwarded_deltas = {}
         self.source_last_seen: dict[tuple[int, str], float] = {}
         self.source_meters: dict[int, dict[str, tuple[int, int]]] = {}
         self.next_meter_id: dict[int, int] = {}
         self.previous_port_counters = {}
+        self.port_telemetry = {}
+        self.port_metrics = {}
+        self.probe_telemetry = NetworkTelemetry()
         self.previous_meter_counters = {}
         self.port_deltas = {}
         self.meter_deltas = {}
@@ -161,6 +198,22 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                         datapath,
                         meter_id=meter_id,
                     ))
+            probe_metrics = self.probe_telemetry.snapshot()
+            if (
+                probe_metrics.latency_ms is not None
+                or probe_metrics.probe_loss_ratio is not None
+            ):
+                self.logger.info(
+                    "PROBE_METRICS latency_ms=%s jitter_ms=%s "
+                    "probe_loss_pct=%s reliability_pct=%s",
+                    probe_metrics.latency_ms,
+                    probe_metrics.jitter_ms,
+                    None if probe_metrics.probe_loss_ratio is None
+                    else round(probe_metrics.probe_loss_ratio * 100, 2),
+                    None if probe_metrics.reliability is None
+                    else round(probe_metrics.reliability * 100, 2),
+                )
+
             hub.sleep(POLL_SECONDS)
 
     @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
@@ -174,6 +227,27 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                 continue
 
             key = (dpid, port_no)
+            now = time.monotonic()
+            telemetry = self.port_telemetry.setdefault(
+                key, NetworkTelemetry(link_capacity_mbps=20.0)
+            )
+            telemetry.update_interface_counters(
+                int(stat.rx_bytes), int(stat.tx_bytes), now
+            )
+            metrics = telemetry.snapshot()
+            if telemetry.has_throughput_sample:
+                self.port_metrics[key] = {
+                    "timestamp": now,
+                    "metrics": metrics,
+                }
+                self.logger.info(
+                    "PORT_METRICS dpid=%s port=%s rx_mbps=%.3f "
+                    "tx_mbps=%.3f utilization=%.3f",
+                    dpid, port_no,
+                    metrics.rx_throughput_mbps,
+                    metrics.tx_throughput_mbps,
+                    metrics.link_utilization or 0.0,
+                )
             current = (int(stat.rx_packets), int(stat.tx_packets),
                        int(stat.rx_bytes), int(stat.tx_bytes))
             previous = self.previous_port_counters.get(key)
@@ -262,9 +336,43 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
 
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
         if ip_pkt is not None:
+            udp_pkt = pkt.get_protocol(udp.udp)
+
+            # Private FairShield probe reports: consume, do not forward.
+            if udp_pkt is not None and int(udp_pkt.dst_port) == 9999:
+                try:
+                    raw_payload = pkt.protocols[-1]
+                    report = json.loads(bytes(raw_payload).decode("utf-8"))
+
+                    if (
+                        ip_pkt.src == "10.0.0.2"
+                        and report.get("type") == "fairshield_probe"
+                    ):
+                        success = report.get("success") is True
+                        rtt = report.get("rtt_ms")
+                        self.probe_telemetry.record_probe(
+                            success,
+                            float(rtt) if success else None,
+                        )
+                except (ValueError, TypeError, UnicodeDecodeError, AttributeError):
+                    self.logger.warning("Invalid FairShield probe report")
+
+                return
+
             self._ensure_source_observer(datapath, ip_pkt.src)
 
         dpid = datapath.id
+
+        # Record initial TCP SYN packets (SYN set, ACK clear).
+        if ip_pkt is not None:
+            tcp_pkt = pkt.get_protocol(tcp.tcp)
+            if (
+                tcp_pkt is not None
+                and tcp_pkt.bits & tcp.TCP_SYN
+                and not tcp_pkt.bits & tcp.TCP_ACK
+            ):
+                self.syn_telemetry.record_packet_in(dpid, ip_pkt.src)
+
         learned = self.mac_to_port.setdefault(dpid, {})
         learned[eth.src] = in_port
         out_port = learned.get(eth.dst, ofp.OFPP_FLOOD)
@@ -278,6 +386,7 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                 "eth_dst": eth.dst,
                 "eth_type": eth.ethertype,
             }
+            tcp_pkt = None
             ip_pkt = pkt.get_protocol(ipv4.ipv4)
             if ip_pkt is not None:
                 match_fields.update({"eth_type": ether_types.ETH_TYPE_IP,
@@ -298,6 +407,27 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                 instructions=instructions,
                 idle_timeout=FLOW_IDLE_TIMEOUT,
             ))
+
+            # Higher-priority counter for initial TCP SYN packets.
+            if tcp_pkt is not None:
+                syn_match_fields = dict(match_fields)
+                syn_match_fields["tcp_flags"] = (tcp.TCP_SYN, 0x12)
+                syn_match = parser.OFPMatch(**syn_match_fields)
+
+                syn_flow_id = str(syn_match)
+                self.syn_telemetry.prime_flow_counter(
+                    dpid, ip_pkt.src, syn_flow_id
+                )
+
+                datapath.send_msg(parser.OFPFlowMod(
+                    datapath=datapath,
+                    table_id=1,
+                    priority=110,
+                    cookie=SYN_FLOW_COOKIE,
+                    match=syn_match,
+                    instructions=instructions,
+                    idle_timeout=FLOW_IDLE_TIMEOUT,
+                ))
 
         data = None if msg.buffer_id != ofp.OFP_NO_BUFFER else msg.data
         datapath.send_msg(parser.OFPPacketOut(
@@ -343,6 +473,21 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
             key = (dpid, f"{table_id}:{int(stat.priority)}:{match}")
             current = (int(stat.packet_count), int(stat.byte_count))
             previous = self.previous_counters.get(key)
+
+            # Collect SYN-only counter deltas independently.
+            is_syn_flow = (
+                table_id == 1
+                and int(getattr(stat, "cookie", 0)) == SYN_FLOW_COOKIE
+            )
+            if is_syn_flow:
+                syn_delta = self.syn_telemetry.update_flow_counter(
+                    dpid, src_ip, str(match), current[0]
+                )
+                if syn_delta:
+                    self.logger.info(
+                        "SYN_DELTA source=%s packets=%s",
+                        src_ip, syn_delta,
+                    )
 
             if table_id == 1:
                 rec["table1_seen"] = True
@@ -400,7 +545,7 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
                 dst_ip="0.0.0.0",
                 packets=rec["offered_packets"],
                 byte_count=rec["offered_bytes"],
-                syn_packets=0,
+                syn_packets=self.syn_telemetry.consume_window(dpid, src_ip),
                 unique_dst_ports=len(rec["ports"]),
                 duration_s=POLL_SECONDS,
                 label="unknown",
@@ -411,18 +556,37 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
         if samples:
             self.window_id += 1
 
+        # V3 AI inference: evaluate real samples for active enforcement
+        # the existing V2 enforcement decision.
+        if self.ai_adapter is not None and samples:
+            try:
+                total_pps = sum(sample.pps for sample in samples)
+                self.ai_adapter.set_window_total_pps(total_pps)
+
+                for sample in samples:
+                    ai_result = self.ai_adapter.detect(sample)
+                    self.logger.info(
+                        "AI_ACTIVE source=%s ai_decision_suspicious=%s "
+                        "rule_score=%.3f reasons=%s",
+                        sample.src_ip,
+                        ai_result.suspicious,
+                        ai_result.score,
+                        " | ".join(ai_result.reasons),
+                    )
+            except Exception:
+                self.logger.exception(
+                    "V3 AI processing failed; rule-based fallback remains available"
+                )
+
         # Switch port 5 is the egress link toward h5.
-        port = self.port_deltas.get((dpid, 5))
+        port = self.port_metrics.get((dpid, 5))
         port_fresh = (
             port is not None
             and now - port["timestamp"] <= 2 * POLL_SECONDS
         )
 
         if port_fresh and samples:
-            utilization = min(
-                1.0,
-                port["tx_bytes"] * 8 / (20_000_000 * POLL_SECONDS),
-            )
+            utilization = port["metrics"].link_utilization or 0.0
 
             adaptive_samples = []
             feedback_by_source = {}
@@ -642,8 +806,9 @@ class FairShieldRyuApp(_AppBase):  # pragma: no cover - requires OVS/Mininet
         match = parser.OFPMatch(eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src_ip)
         datapath.send_msg(parser.OFPFlowMod(
             datapath=datapath,
-            command=ofp.OFPFC_DELETE,
+            command=ofp.OFPFC_DELETE_STRICT,
             table_id=0,
+            priority=40000,
             out_port=ofp.OFPP_ANY,
             out_group=ofp.OFPG_ANY,
             match=match,

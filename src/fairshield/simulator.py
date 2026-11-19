@@ -80,6 +80,8 @@ def generate_window(window_id: int, scenario: str, rng: random.Random) -> list[F
             ports = 1
             avg_bytes = rng.randint(500, 1100)
             label = "benign"
+        service_class = "bursty" if kind == "flash" else "standard"
+
         samples.append(FlowSample(
             window_id=window_id,
             src_ip=src_ip,
@@ -90,6 +92,7 @@ def generate_window(window_id: int, scenario: str, rng: random.Random) -> list[F
             unique_dst_ports=ports,
             duration_s=1.0,
             label=label,
+            service_class=service_class,
         ))
     return samples
 

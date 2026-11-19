@@ -62,6 +62,35 @@ class AdaptivePolicyTests(unittest.TestCase):
         self.assertGreater(recovered, lowered)
         self.assertLessEqual(recovered, policy.config.initial_attack_cap_pps)
 
+    def test_attack_limit_stays_latched_until_cap_recovers(self):
+        policy = AdaptiveFairnessController()
+        source = "10.0.1.1"
+        attack_feedback = NetworkFeedback(0.99, 0.60, 0.50)
+        healthy_feedback = NetworkFeedback(0.40, 0.99, 0.0)
+
+        policy.decide([attack_sample(source)], {source: attack_feedback})
+        first_benign = policy.decide(
+            [benign_sample(source)], {source: healthy_feedback}
+        )[0]
+
+        self.assertTrue(first_benign.suspicious)
+        self.assertTrue(policy.state_snapshot()[source]["attack_latched"])
+
+        result = first_benign
+        for _ in range(10):
+            result = policy.decide(
+                [benign_sample(source)], {source: healthy_feedback}
+            )[0]
+            if not result.suspicious:
+                break
+
+        self.assertFalse(result.suspicious)
+        self.assertFalse(policy.state_snapshot()[source]["attack_latched"])
+        self.assertAlmostEqual(
+            policy.state_snapshot()[source]["cap_pps"],
+            policy.config.initial_attack_cap_pps,
+        )
+
     def test_weighted_max_min_allocation_respects_capacity_for_multiple_sources(self):
         cfg = AdaptivePolicyConfig(link_capacity_pps=100.0)
         policy = AdaptiveFairnessController(cfg)

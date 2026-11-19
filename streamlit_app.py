@@ -7,6 +7,10 @@ from statistics import mean
 
 import pandas as pd
 import streamlit as st
+import psutil
+
+from fairshield.live_telemetry import read_controller_telemetry, aggregate_port_metrics
+from fairshield.qos_optimizer import QoSOptimizer
 
 ROOT = Path(__file__).resolve().parent
 OUTPUTS = ROOT / "outputs"
@@ -62,7 +66,7 @@ with st.sidebar:
     st.title("Navigation")
     page = st.radio(
         "Choose a view",
-        ["Project overview", "How FairShield works", "Simulation lab", "Live Mininet evidence", "Adaptive policy sandbox", "Testing & limitations"],
+        ["Project overview", "How FairShield works", "Simulation lab", "Live Mininet evidence", "Live QoS & Network Intelligence", "Adaptive policy sandbox", "Testing & limitations"],
     )
     st.divider()
     st.caption("Local research dashboard")
@@ -408,6 +412,111 @@ elif page == "Adaptive policy sandbox":
         st.metric("Updated adaptive cap", f"{st.session_state['sandbox_cap']:.2f} PPS")
 
     st.markdown("**Decision thresholds:** congestion utilization ≥ 90%; headroom utilization ≤ 75%; target legitimate service ≥ 95%; material meter-drop ratio ≥ 10%. Missing feedback in the actual policy causes a hold, not an assumption of healthy conditions.")
+
+
+elif page == "Live QoS & Network Intelligence":
+    st.subheader("Live network health and QoS intelligence")
+    st.caption("Data is read from the controller log. Refresh to load the latest records.")
+
+    if st.button("Refresh live telemetry", type="primary"):
+        st.rerun()
+
+    telemetry = read_controller_telemetry(
+        OUTPUTS / "logs" / "controller_telemetry.log"
+    )
+
+    if not telemetry["available"]:
+        st.error("Controller telemetry log not found.")
+    else:
+        ports = telemetry["ports"]
+        probe = telemetry["probe"]
+        summary = aggregate_port_metrics(telemetry)
+
+        cpu = psutil.cpu_percent(interval=0.2)
+        memory = psutil.virtual_memory().percent
+
+        st.caption(
+            f"Log updated: {telemetry['log_updated']} · "
+            f"Parsed records: {telemetry['records']}"
+        )
+
+        st.markdown("### Probe quality")
+        a, b, c, d = st.columns(4)
+        a.metric("Latency", "N/A" if probe["latency_ms"] is None else f"{probe['latency_ms']:.3f} ms")
+        b.metric("Jitter", "N/A" if probe["jitter_ms"] is None else f"{probe['jitter_ms']:.3f} ms")
+        c.metric("Probe loss", "N/A" if probe["probe_loss_ratio"] is None else f"{probe['probe_loss_ratio']:.2%}")
+        d.metric("Reliability", "N/A" if probe["reliability"] is None else f"{probe['reliability']:.2%}")
+
+        st.markdown("### Switch port telemetry")
+        if ports:
+            df = pd.DataFrame(list(ports.values())).sort_values(["dpid", "port"])
+            st.dataframe(df, hide_index=True, use_container_width=True)
+
+            x, y, z = st.columns(3)
+            x.metric("Sum of port RX", f"{summary['rx_throughput_mbps']:.3f} Mbps")
+            y.metric("Sum of port TX", f"{summary['tx_throughput_mbps']:.3f} Mbps")
+            z.metric("Highest port utilization", f"{summary['link_utilization']:.1%}")
+
+            st.caption("Port-counter sums are not end-to-end application throughput.")
+        else:
+            st.warning("No port records yet. Generate Mininet traffic and refresh.")
+
+        qos_metrics = {
+            "latency_ms": probe["latency_ms"],
+            "jitter_ms": probe["jitter_ms"],
+            "probe_loss_ratio": probe["probe_loss_ratio"],
+            "link_utilization": summary["link_utilization"],
+            "cpu_percent": cpu,
+            "memory_percent": memory,
+        }
+
+        assessment = QoSOptimizer().evaluate(qos_metrics)
+
+        st.markdown("### QoS optimizer")
+        x, y = st.columns(2)
+        x.metric("Network status", assessment.status)
+        y.metric(
+            "QoS score",
+            "N/A" if assessment.status == "INSUFFICIENT_DATA"
+            else f"{assessment.score:.0f}/100"
+        )
+        st.write(assessment.recommendation)
+        for reason in assessment.reasons:
+            st.write(f"• {reason}")
+
+        st.markdown("### Host resource usage")
+        x, y = st.columns(2)
+        x.metric("WSL host CPU", f"{cpu:.1f}%")
+        y.metric("WSL host memory", f"{memory:.1f}%")
+        st.caption("Host-level readings, not isolated controller-process measurements.")
+
+        st.markdown("### AI detection and adaptive policy")
+        x, y = st.columns(2)
+        ai = telemetry["ai"]
+        adaptive = telemetry["adaptive"]
+
+        with x:
+            st.markdown("**Latest AI detection**")
+            if ai:
+                st.write(f"Source: {ai['source']}")
+                st.write(f"Suspicious: {ai['suspicious']}")
+                st.write(f"Rule score: {ai['rule_score']:.3f}")
+            else:
+                st.info("No AI detection record found.")
+
+        with y:
+            st.markdown("**Latest adaptive decision**")
+            if adaptive:
+                st.write(f"Source: {adaptive['source']}")
+                st.write(f"Action: {adaptive['action']}")
+                st.write(f"Offered: {adaptive['offered_pps']:.1f} PPS")
+                st.write(f"Cap: {adaptive['cap_pps']:.1f} PPS")
+                st.write(f"Allocated: {adaptive['allocated_pps']:.1f} PPS")
+                st.write(f"Adjustment: {adaptive['adjustment']}")
+            else:
+                st.info("No adaptive decision record found.")
+
+        st.info("QoS recommendations are advisory only; they do not modify OpenFlow rules.")
 
 elif page == "Testing & limitations":
     st.subheader("Verification status")

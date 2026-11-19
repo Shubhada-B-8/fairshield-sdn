@@ -1,0 +1,2 @@
+scenario,policy,windows,seed,capacity_pps,legitimate_preservation,attack_mitigation,jain_satisfaction_fairness,delivered_pps,precision,recall,f1,mean_attack_cap_pps,min_attack_cap_pps,max_attack_cap_pps
+normal,adaptive_fairshield_v2,30,7,500.0,0.9553495658985574,0.0,0.9998848566111991,487.8333333333333,0.0,0.0,0.0,0.0,0.0,0.0

@@ -1,0 +1,27 @@
+FairShield-SDN V3 - Mixed Traffic Group Analysis
+Scenario: mixed
+Windows: 30
+Seed: 7
+Capacity: 500 PPS
+
+Normal legitimate:
+Offered: 13200 PPS
+Delivered: 9953.50 PPS
+Preservation: 75.41%
+Congestion dropped: 3246.50 PPS
+
+DDoS attackers:
+Offered: 142354 PPS
+Delivered: 900 PPS
+Policy filtered: 141454 PPS
+Preservation: 0.63%
+
+Flash-crowd legitimate:
+Offered: 24052 PPS
+Delivered: 4146.46 PPS
+Preservation: 17.24%
+Congestion dropped: 19905.54 PPS
+
+Finding:
+AI attack mitigation is strong, but the congestion allocator
+does not adequately protect legitimate flash-crowd traffic.
